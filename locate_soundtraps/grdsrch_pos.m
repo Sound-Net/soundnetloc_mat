@@ -1,4 +1,4 @@
-function [location_final, chi2val, grdsurf] = grdsrch_pos(clkgeobearings, srclocations, varargin)
+function [location_final, chi2val, grdsurf, bearingoffset] = grdsrch_pos(clkgeobearings, srclocations, varargin)
 %GRDSRCH_POS Locates the soundtrap using a grid search
 %   [LOCATION_FINAL, CHI2VAL, GRDSURF] = GRDSRCH_ST_POS(CLKGEOBEARINGS,
 %   SRCLOCATION) uses a grid search to find the latitiude and
@@ -20,7 +20,14 @@ function [location_final, chi2val, grdsurf] = grdsrch_pos(clkgeobearings, srcloc
 % * maxchi2 - the maximum chi2- this is really only needed for plotting
 %   surfaces.
 % * 'searchtype' -> the type of angles to use in search 'bearing', 'slant'
-%   or 'all' Default is 'all';
+%   or 'all' Default is 'all'; 'bearing_offset' and 'both_offset' allow
+%   the bearings a systematic offset (e.g. a heading error) so only their
+%   shape over the track has to match - see ST_LOC_CHI2.
+%
+%   [LOCATION_FINAL, CHI2VAL, GRDSURF, BEARINGOFFSET] = GRDSRCH_POS(...)
+%   also returns the bearing offset (measured - true, RADIANS) at
+%   LOCATION_FINAL. GRDSURF.BEARINGOFFSET holds it for every grid point.
+%   It is 0 unless an _offset search type is used.
 
 
 latlims = minmax(srclocations(:,1));
@@ -64,6 +71,7 @@ yv = linspace(lonlims(1), lonlims(2), gridsize);
 latLong2 = srclocations(:, [1 2]);
 dpthdiff = srclocations(:, 3);
 chi2    = zeros(length(xv), length(yv));
+offsets = zeros(length(xv), length(yv));
 Xinterp = zeros(length(xv), length(yv));
 Yinterp = zeros(length(xv), length(yv));
 for i=1:length(xv)
@@ -71,7 +79,7 @@ for i=1:length(xv)
         if (mod(j,25)==0)
             disp([pretxt 'Running grid search: ' num2str(i*length(yv)+j) ' of ' num2str(length(xv)*length(yv))])
         end
-        chi2(i,j)=st_loc_chi2([xv(i), yv(j)], latLong2, dpthdiff, clkgeobearings, srchtype);
+        [chi2(i,j), offsets(i,j)]=st_loc_chi2([xv(i), yv(j)], latLong2, dpthdiff, clkgeobearings, srchtype);
         if (isnan(  chi2(i,j)))
             warning(['grdsrch_pos: chi2(' num2str(i) ',' '.is nan']);
         end
@@ -87,10 +95,12 @@ end
 [row, col] = ind2sub(size(chi2), index);
 
 location_final = [xv(row), yv(col)];
+bearingoffset = offsets(row, col);
 
 grdsurf.Xinterp = Xinterp;
 grdsurf.Yinterp = Yinterp;
 grdsurf.chi2 = chi2;
+grdsurf.bearingoffset = offsets;
 
 end
 

@@ -1,4 +1,4 @@
-function [chi2] = st_loc_chi2(xlatlon, latlonsource, stdepths, obsangle, angletype)
+function [chi2, bearingoffset] = st_loc_chi2(xlatlon, latlonsource, stdepths, obsangle, angletype)
 %ST_LOC_CHI2 Calculates a chi2 variable for the location of a soundtrap
 %based on slant angles and bearings
 %   [CHI2] = ST_LOC_CHI2(XLATLON, LATLONSOURCE, STDEPTHS, OBSANGLES)
@@ -11,15 +11,26 @@ function [chi2] = st_loc_chi2(xlatlon, latlonsource, stdepths, obsangle, anglety
 %
 %   [CHI2] = ST_LOC_CHI2(XLATLON, LATLONSOURCE, STDEPTHS, OBSANGLES, ANGELTYPE)
 %   returns the CHI2 value for a specified angle type. Angle types can be
-%   'bearing', 'slant' or 'all'. The default is all
+%   'bearing', 'slant', 'all' (or 'both'), 'bearing_offset' or
+%   'both_offset'. The default is all.
+%
+%   The _offset types allow the measured bearings a systematic offset, e.g.
+%   a compass heading error: the offset (the circular mean of measured -
+%   true bearing) is removed before the bearing chi2 is calculated, so only
+%   the shape of the bearings over the track has to match. The slant angles
+%   are unaffected by a heading error so 'both_offset' uses them as they are.
+%
+%   [CHI2, BEARINGOFFSET] = ST_LOC_CHI2(...) also returns the bearing offset
+%   (measured - true, RADIANS) removed at XLATLON. It is 0 unless an _offset
+%   angle type is used.
 
 
 % to reduce strcmp statement angle type is a flag. 
 % 0- all
 % 1 - just bearing
 % 2- just slant
-
-if nargin<4
+useoffset = false;
+if nargin<5
     angtype = 0;
 else
     switch (angletype)
@@ -27,6 +38,12 @@ else
             angtype = 1;
         case 'slant'
             angtype = 2;
+        case 'bearing_offset'
+            angtype = 1;
+            useoffset = true;
+        case 'both_offset'
+            angtype = 0;
+            useoffset = true;
         otherwise
             angtype=0;
     end
@@ -35,8 +52,10 @@ end
 errslnt= deg2rad(3); % lets guess the error is about 3 degrees(pinger was not exactly straight); 
 errbearing= deg2rad(5); % lets guess the error is about 5 degrees(pinger was not exactly straight); 
 
+nsrc = length(latlonsource(:,1));
+bearingres = zeros(nsrc, 1); % measured - true bearing
 chi2=0;
-for i=1:length(latlonsource(:,1))
+for i=1:nsrc
     %simple calulate here depth is one side of the triangle, horizontal
     %range is the other
     r = latLong2meters(xlatlon(1), xlatlon(2),...
@@ -51,7 +70,7 @@ for i=1:length(latlonsource(:,1))
              assignin('base','xlatlon',xlatlon);
              assignin('base','latlonsource',latlonsource(i,:));
         end
-        chi2=chi2+(angdiff(bearing , obsangle(i,1)))^2/errbearing^2;
+        bearingres(i) = angdiff(bearing , obsangle(i,1));
     end
     
     %%Slant angle 
@@ -67,7 +86,17 @@ for i=1:length(latlonsource(:,1))
     %%other chi2 variables to be added here. 
 end
 
+%the bearing offset is the circular mean of the residuals so it is not
+%upset by residuals either side of +-pi
+bearingoffset = 0;
+if (useoffset)
+    bearingoffset = angle(sum(exp(1i*bearingres)));
+    bearingres = angdiff(bearingoffset, bearingres);
+end
+if (angtype == 0 || angtype ==1)
+    chi2 = chi2 + sum(bearingres.^2)/errbearing^2;
+end
+
 chi2=chi2/length(latlonsource); 
 
 end
-
