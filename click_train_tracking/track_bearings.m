@@ -49,6 +49,17 @@ function res = track_bearings(clktimes, bearings, varargin)
 %      tracker again, allowing gaps of up to mopGap s, to form new tracks.
 %      (c) The new tracks are stitched and extended as in 2b and (a).
 %
+%   2d. Click trains (optional, clickTrains). A porpoise passing close to
+%      a device which is not moving sweeps through tens of degrees in a
+%      second or two: too fast for a fragment, which needs the clicks of a
+%      window to share a bearing. The clicks left over after the stages
+%      above are followed one at a time instead: a click joins a train if
+%      it comes within trainMaxICI of the train's last click and lies
+%      within trainTol of where the train's last few clicks say the
+%      bearing should be. Trains of at least trainMinClicks clicks are cut
+%      into short fragments, become tracks and are stitched to the other
+%      tracks as in 2b. This needs clean bearings, so it is off by default.
+%
 %   3. Click grouping. Every click (including those rejected as noise in
 %      stage 1) is assigned to the track whose smoothed angles at the
 %      click time are closest, provided it is inside the ellipse set by
@@ -87,6 +98,10 @@ function res = track_bearings(clktimes, bearings, varargin)
 %     dupMaxFrags   - a live track with this many fragments or fewer that
 %                     is close to another live track is merged into it [2]
 %     minTrackFrags - min fragments for a confirmed track [3]
+%     minTrackClicks- a track of at least two fragments with this many
+%                     clicks is confirmed even if it has fewer than
+%                     minTrackFrags fragments, so a short but dense run
+%                     of clicks is not thrown away [Inf]
 %     stitchGap     - max gap between tracks to stitch (s) [60]
 %     stitchOverlap - max time overlap between tracks to stitch (s) [10]
 %     stitchTol     - bearing tolerance for stitching (deg) [20]
@@ -98,6 +113,12 @@ function res = track_bearings(clktimes, bearings, varargin)
 %     mopGap        - max time from a track to mop up a fragment (s) [60]
 %     mopTol        - bearing tolerance for mopping up fragments (deg) [15]
 %     mopTolV       - vertical tolerance for mopping up fragments (deg) [20]
+%     clickTrains   - run the click train stage [false]
+%     trainMaxICI   - max time between the clicks of a train (s) [0.5]
+%     trainTol      - max bearing distance of a click from the train's
+%                     prediction (deg) [4]
+%     trainMaxRate  - max bearing rate of a train (deg/s) [60]
+%     trainMinClicks- min clicks in a train [12]
 %     smoothFrags   - moving median span for the track curves [3]
 %     clickTol      - max click bearing distance from track (deg) [10]
 %     clickTolV     - max click vertical distance from track (deg) [25]
@@ -149,6 +170,7 @@ p = struct( ...
     'maxGap',        30, ...
     'dupMaxFrags',   2, ...
     'minTrackFrags', 3, ...
+    'minTrackClicks', Inf, ...
     'stitchGap',     60, ...
     'stitchOverlap', 10, ...
     'stitchTol',     20, ...
@@ -160,6 +182,11 @@ p = struct( ...
     'mopGap',        60, ...
     'mopTol',        15, ...
     'mopTolV',       20, ...
+    'clickTrains',   false, ...
+    'trainMaxICI',   0.5, ...
+    'trainTol',      4, ...
+    'trainMaxRate',  60, ...
+    'trainMinClicks', 12, ...
     'smoothFrags',   3, ...
     'clickTol',      10, ...
     'clickTolV',     25, ...
@@ -223,6 +250,13 @@ fragTrack = link_fragments(frags, p);
 if p.mopUp
     [fragTrack, nTracks] = mop_up(frags, fragTrack, p);
 end
+
+%% Stage 2d: trains of clicks whose bearing changes too fast for fragments
+if p.clickTrains
+    left = valid & group_clicks(frags, fragTrack, nTracks, t, b, v, valid, p) == 0;
+    [frags, fragTrack] = click_trains(frags, fragTrack, t, b, v, left, p);
+    [fragTrack, nTracks] = stitch_tracks(frags, fragTrack, p);
+end
 frags.track = fragTrack;
 
 %% Stage 3: track curves and click grouping
@@ -283,6 +317,102 @@ res.tracks = tracks;
 res.clickTrack = clickTrack;
 res.isEcho = isEcho;
 
+end
+
+%% ------------------------------------------------------------------------
+function clickTrack = group_clicks(frags, fragTrack, nTracks, t, b, v, valid, p)
+% track of each click (0 = none): the track whose curve is closest at the
+% click time, if it is within the click tolerances
+dist = inf(numel(t), nTracks);
+for k = 1:nTracks
+    [~, tf, bs, vs] = track_curve(frags, fragTrack, k, p);
+    inspan = valid & t >= tf(1) - p.clickPad & t <= tf(end) + p.clickPad;
+    tc = min(max(t(inspan), tf(1)), tf(end)); % hold ends flat
+    db = wrapdeg(b(inspan) - interp_curve(tf, bs, tc))/p.clickTol;
+    dv = (v(inspan) - interp_curve(tf, vs, tc))/p.clickTolV;
+    dist(inspan, k) = sqrt(db.^2 + dv.^2);
+end
+clickTrack = zeros(numel(t), 1);
+if nTracks > 0
+    [dmin, kmin] = min(dist, [], 2);
+    clickTrack(dmin <= 1) = kmin(dmin <= 1);
+end
+end
+
+function [frags, fragTrack] = click_trains(frags, fragTrack, t, b, v, left, p)
+% Follow the clicks in LEFT one at a time into trains of smoothly changing
+% bearing, and add each train as a new track of short fragments.
+
+ci = find(left);
+[~, order] = sort(t(ci));
+ci = ci(order);
+
+% a train: click indices, times and unwrapped bearings
+C = struct('idx', {}, 't', {}, 'b', {});
+active = zeros(1, 0);
+nfit = 10; % clicks the prediction is fitted to
+for i = ci(:)'
+    active = active(arrayfun(@(k) t(i) - C(k).t(end) <= p.trainMaxICI, active));
+    best = 0; besterr = inf; bestb = 0;
+    for k = active
+        n = numel(C(k).t);
+        dt = t(i) - C(k).t(end);
+        if n >= 3
+            s = max(1, n - nfit + 1):n;
+            x = C(k).t(s) - C(k).t(end);
+            y = C(k).b(s);
+            sxx = sum((x - mean(x)).^2);
+            rate = 0;
+            if sxx > 0
+                rate = sum((x - mean(x)).*(y - mean(y)))/sxx;
+            end
+            rate = max(min(rate, p.trainMaxRate), -p.trainMaxRate);
+            pred = mean(y) - rate*mean(x) + rate*dt;
+            tol = p.trainTol + p.trainMaxRate/4*dt;
+        else
+            pred = C(k).b(end);
+            tol = p.trainTol + p.trainMaxRate*dt;
+        end
+        err = abs(wrapdeg(b(i) - pred));
+        if err <= tol && err < besterr
+            best = k; besterr = err;
+            bestb = pred + wrapdeg(b(i) - pred);
+        end
+    end
+    if best > 0
+        C(best).idx(end+1) = i;
+        C(best).t(end+1) = t(i);
+        C(best).b(end+1) = bestb;
+    else
+        C(end+1) = struct('idx', i, 't', t(i), 'b', b(i)); %#ok<AGROW>
+        active(end+1) = numel(C); %#ok<AGROW>
+    end
+end
+
+% trains with enough clicks become tracks, cut into fragments of a few
+% clicks so the track curve follows the bearing
+nTracks = max([fragTrack; 0]);
+for k = 1:numel(C)
+    n = numel(C(k).idx);
+    if n < p.trainMinClicks
+        continue
+    end
+    nTracks = nTracks + 1;
+    edges = round(linspace(0, n, max(2, floor(n/6)) + 1));
+    for j = 1:numel(edges) - 1
+        sel = C(k).idx(edges(j)+1:edges(j+1));
+        [mb, sd] = circstats(b(sel));
+        frags.t(end+1, 1) = mean(t(sel));
+        frags.bearing(end+1, 1) = mb;
+        frags.sd(end+1, 1) = sd;
+        frags.vertical(end+1, 1) = mean(v(sel));
+        frags.sdV(end+1, 1) = std(v(sel));
+        frags.n(end+1, 1) = numel(sel);
+        frags.win(end+1, 1) = floor(mean(t(sel))/p.windowLen);
+        frags.clickIdx{end+1, 1} = sel(:);
+        fragTrack(end+1, 1) = nTracks; %#ok<AGROW>
+    end
+end
 end
 
 %% ------------------------------------------------------------------------
@@ -520,7 +650,8 @@ end
 % confirm tracks with enough fragments
 nTracks = 0;
 for k = 1:numel(T)
-    if numel(T(k).frags) >= p.minTrackFrags
+    nf = numel(T(k).frags);
+    if nf >= p.minTrackFrags || (nf >= 2 && sum(frags.n(T(k).frags)) >= p.minTrackClicks)
         nTracks = nTracks + 1;
         fragTrack(T(k).frags) = nTracks;
     end
