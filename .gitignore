@@ -5,3 +5,4 @@
 # Local/archive folders
 _old/
 _tests/
+.DS_Store

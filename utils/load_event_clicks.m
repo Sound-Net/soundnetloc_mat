@@ -39,13 +39,68 @@ conn = sqlite(sqlLite_dB,'readonly');
 
 % setdbprefs('DataReturnFormat','cellarray') %<- does not work on 2018 above?
 
-sqlquery = 'select Id, UTC, UTCMilliseconds, PCLocalTime, PCTime, EventId, BinaryFile, ClickNo, Amplitude, Channels, UID, ChannelBitmap, parentID, parentUID, LongDataName from Click_Detector_OfflineClicks';
-% curs = fetch(conn, sqlquery, 'DataReturnFormat','cellarray'); % does not work on 2017 below
-cursclicks = fetch(conn, sqlquery, 'DataReturnFormat', 'cellarray');
-fileNamesAll=strip(cursclicks(:,7)); % database names can be padded with trailing spaces (fix from Michael Ladegaard)
-clickNosAll=cell2mat(cursclicks(:,11));
-clicksTimeAll=cursclicks(:,2);
-eventIdH=cell2mat(cursclicks(:,6));
+% Event clicks can be stored in one of two formats:
+%  - Legacy format: clicks are in Click_Detector_OfflineClicks with an
+%    EventId column linking to Click_Detector_OfflineEvents.
+%  - New format (click events subsumed into detection groups): clicks are
+%    in Click_Detector_OfflineEvents_Children with parentID linking to
+%    Click_Detector_OfflineEvents (Click_Detector_OfflineClicks is empty).
+% Both are read (if present) and merged so either format, or a mix, works.
+fileNamesAll = {};
+clickNosAll = [];
+clicksTimeAll = {};
+eventIdH = [];
+
+% legacy format
+if (table_exists(conn, 'Click_Detector_OfflineClicks'))
+    sqlquery = 'select Id, UTC, UTCMilliseconds, PCLocalTime, PCTime, EventId, BinaryFile, ClickNo, Amplitude, Channels, UID, ChannelBitmap, parentID, parentUID, LongDataName from Click_Detector_OfflineClicks';
+    % curs = fetch(conn, sqlquery, 'DataReturnFormat','cellarray'); % does not work on 2017 below
+    cursclicks = fetch(conn, sqlquery, 'DataReturnFormat', 'cellarray');
+    if (~isempty(cursclicks))
+        fileNamesAll=strip(cursclicks(:,7)); % database names can be padded with trailing spaces (fix from Michael Ladegaard)
+        clickNosAll=double(cell2mat(cursclicks(:,11)));
+        clicksTimeAll=cursclicks(:,2);
+        eventIdH=double(cell2mat(cursclicks(:,6)));
+    end
+end
+nLegacy = length(eventIdH);
+
+% new detection group format
+nNew = 0;
+if (table_exists(conn, 'Click_Detector_OfflineEvents_Children'))
+    sqlquery = 'select Id, UTC, BinaryFile, UID, parentID, parentUID, LongDataName from Click_Detector_OfflineEvents_Children';
+    curschildren = fetch(conn, sqlquery, 'DataReturnFormat', 'cellarray');
+    if (~isempty(curschildren))
+        % detection groups can hold children from other data blocks - keep
+        % only clicks (LongDataName is e.g. 'Click Detector, Clicks').
+        dataNames = strip(curschildren(:,7));
+        isClick = endsWith(dataNames, 'Clicks', 'IgnoreCase', true);
+        if (~any(isClick))
+            isClick = true(size(dataNames)); % unusual naming, keep everything
+        end
+        curschildren = curschildren(isClick, :);
+        nNew = size(curschildren, 1);
+
+        fileNamesAll=[fileNamesAll(:); strip(curschildren(:,3))];
+        clickNosAll=[clickNosAll(:); double(cell2mat(curschildren(:,4)))];
+        clicksTimeAll=[clicksTimeAll(:); curschildren(:,2)];
+        eventIdH=[eventIdH(:); double(cell2mat(curschildren(:,5)))];
+    end
+end
+
+if (verbose)
+    disp(['Event clicks found: ' num2str(nLegacy) ' in legacy OfflineClicks table, ' ...
+        num2str(nNew) ' in detection group (OfflineEvents_Children) table']);
+end
+
+% remove any duplicates (same click in same event in both tables)
+if (nLegacy > 0 && nNew > 0)
+    [~, iu] = unique([eventIdH(:) clickNosAll(:)], 'rows', 'stable');
+    fileNamesAll = fileNamesAll(iu);
+    clickNosAll = clickNosAll(iu);
+    clicksTimeAll = clicksTimeAll(iu);
+    eventIdH = eventIdH(iu);
+end
 
 % disp('Found the following event IDs');
 % disp(num2str(unique(eventId)))
@@ -148,4 +203,11 @@ end
 if n==1
     click_events=[];
 end
-% end
+end
+
+function exists = table_exists(conn, tableName)
+%TABLE_EXISTS Check whether a table exists in an sqlite database.
+res = fetch(conn, ['select name from sqlite_master where type=''table'' and name=''' tableName ''''], ...
+    'DataReturnFormat', 'cellarray');
+exists = ~isempty(res);
+end
