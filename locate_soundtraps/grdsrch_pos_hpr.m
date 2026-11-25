@@ -36,6 +36,10 @@ function [location, hpr, chi2val, grdsurf] = grdsrch_pos_hpr(clkgeobearings, src
 % * 'errbearing', 'errslant' - the assumed angular errors in DEGREES used
 %   to weight the two angle types. Defaults 5 and 3, the same as
 %   ST_LOC_CHI2.
+% * 'slantfun' - function handle S = F(R, DZ) giving the slant angle (RADIANS)
+%   a source at horizontal range R (m) and DZ (m) above the platform
+%   arrives from, e.g. from a ray traced propagation table so refraction is
+%   allowed for. Default [] is a straight line, atan(DZ./R).
 % * 'maxchi2' - chi2 values above this are clipped in GRDSURF. This only
 %   affects plotting. Default inf.
 % * 'pretext' - text to prepend to the progress messages.
@@ -69,6 +73,7 @@ errbearing = 5;
 errslant = 3;
 maxchi2 = inf;
 pretxt = '';
+slantfun = [];
 
 iArg = 0;
 while iArg < numel(varargin)
@@ -107,6 +112,9 @@ while iArg < numel(varargin)
         case 'pretext'
             iArg = iArg + 1;
             pretxt = varargin{iArg};
+        case 'slantfun'
+            iArg = iArg + 1;
+            slantfun = varargin{iArg};
         otherwise
             error('grdsrch_pos_hpr:badarg', ...
                 'Unknown argument in position %i', iArg);
@@ -158,7 +166,11 @@ for i = 1:npos
     end
 
     if useslant
-        truslant(i,:) = atan(srclocations(:,3)./r);
+        if isempty(slantfun)
+            truslant(i,:) = atan(srclocations(:,3)./r);
+        else
+            truslant(i,:) = slantfun(r(:), srclocations(:,3));
+        end
     end
 end
 
