@@ -10,7 +10,12 @@ function [tdovarience] = error_TDOA(clicks)
 
 %%TODO- add uncertainty due to soundspeed. 
 
-snr = snr_clicks(clicks);
+if isfield(clicks, 'snr') && ~isfield(clicks, 'wave')
+    % clicks loaded without their waveforms keep the SNR (LOAD_EVENT_CLICKS)
+    snr = [clicks.snr]';
+else
+    snr = snr_clicks(clicks);
+end
 
 soundspeederr = 10/1500; % 10ms-1 
 
